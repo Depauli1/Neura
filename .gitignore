@@ -1,0 +1,14 @@
+node_modules/
+out/
+dist/
+*.vsix
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.ipynb_checkpoints/
+.env
+.neura/
+.DS_Store
