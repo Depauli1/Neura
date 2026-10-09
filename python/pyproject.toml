@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neura"
+version = "0.0.1"
+description = "Neura runtime and kernel bridge"
+requires-python = ">=3.10"
+dependencies = [
+  "pandas",
+  "ipython",
+  "fastapi",
+  "uvicorn",
+  "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx", "ruff"]
+
+[tool.setuptools]
+packages = ["neura_core", "neura_runtime", "neura_bridge"]

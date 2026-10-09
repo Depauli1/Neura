@@ -1,0 +1,30 @@
+{
+  "name": "neura",
+  "displayName": "Neura",
+  "description": "AI-native assistant for data science",
+  "version": "0.0.1",
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Data Science", "Machine Learning", "Notebooks"],
+  "main": "./out/extension.js",
+  "activationEvents": ["onLanguage:python", "onNotebook:jupyter-notebook"],
+  "contributes": {
+    "commands": [
+      { "command": "neura.ask", "title": "Neura: Ask Neura" },
+      { "command": "neura.runCell", "title": "Neura: Run Cell" },
+      { "command": "neura.runSelection", "title": "Neura: Run Selection" },
+      { "command": "neura.restartRuntime", "title": "Neura: Restart Runtime" },
+      { "command": "neura.interrupt", "title": "Neura: Interrupt" },
+      { "command": "neura.showOutputs", "title": "Neura: Show Outputs Panel" },
+      { "command": "neura.profileDataFrame", "title": "Neura: Profile DataFrame" }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.0"
+  }
+}
