@@ -1,0 +1,130 @@
+{
+  "name": "neura",
+  "displayName": "Neura",
+  "description": "Local, persistent Python cell and selection execution for data science",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Data Science",
+    "Machine Learning",
+    "Notebooks"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    },
+    "virtualWorkspaces": {
+      "supported": false
+    }
+  },
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:python"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "neura.ask",
+        "title": "Neura: Ask Neura"
+      },
+      {
+        "command": "neura.runCell",
+        "title": "Neura: Run Cell"
+      },
+      {
+        "command": "neura.runSelection",
+        "title": "Neura: Run Selection"
+      },
+      {
+        "command": "neura.restartRuntime",
+        "title": "Neura: Restart Runtime"
+      },
+      {
+        "command": "neura.interrupt",
+        "title": "Neura: Interrupt"
+      },
+      {
+        "command": "neura.showOutputs",
+        "title": "Neura: Show Outputs Panel"
+      },
+      {
+        "command": "neura.showRuntimeLog",
+        "title": "Neura: Show Runtime Log"
+      },
+      {
+        "command": "neura.profileDataFrame",
+        "title": "Neura: Profile DataFrame"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "neura.runCell",
+        "key": "ctrl+alt+enter",
+        "mac": "cmd+alt+enter",
+        "when": "editorTextFocus && neura.canRun"
+      },
+      {
+        "command": "neura.runSelection",
+        "key": "ctrl+alt+r",
+        "mac": "cmd+alt+r",
+        "when": "editorTextFocus && neura.canRun"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "neura.runCell",
+          "when": "neura.canRun",
+          "group": "neura@1"
+        },
+        {
+          "command": "neura.runSelection",
+          "when": "neura.canRun",
+          "group": "neura@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Neura",
+      "properties": {
+        "neura.pythonPath": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Python executable path or command (not shell arguments). Relative paths resolve against the workspace folder. Empty uses the Python extension's selected environment, or python3/python on PATH when that extension is absent. Install neura_runtime in this interpreter. Restart the runtime after changing interpreters."
+        },
+        "neura.executionTimeoutSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0.05,
+          "maximum": 3600,
+          "scope": "resource",
+          "description": "Best-effort timeout for each Python execution. Code that ignores interrupts may require a runtime restart."
+        },
+        "neura.startupTimeoutSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "maximum": 120,
+          "scope": "resource",
+          "description": "How long to wait for runtime startup and its ready handshake."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node test/run.cjs"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.0"
+  }
+}

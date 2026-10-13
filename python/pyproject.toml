@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neura"
+version = "0.1.0"
+description = "Neura runtime and kernel bridge"
+requires-python = ">=3.10"
+dependencies = [
+  "pandas",
+  "ipython>=8.18",
+  "fastapi>=0.115",
+  "pydantic>=2.7",
+  "uvicorn>=0.30",
+  "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx", "ruff"]
+
+[tool.setuptools]
+packages = ["neura_core", "neura_runtime", "neura_bridge"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["."]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["neura_core", "neura_runtime", "neura_bridge"]
