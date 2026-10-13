@@ -1,4 +1,9 @@
-/** Managed-process + authenticated loopback client. No VS Code dependency. */
+/**
+ * Authenticated loopback client shared by both backends. No VS Code
+ * dependency: `ManagedRuntime` spawns its own `neura_runtime` process, while
+ * `AttachedRuntime` injects `neura_bridge` into a kernel that is already
+ * running. Everything after the handshake is identical.
+ */
 import { ChildProcess, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import * as http from "node:http";
@@ -6,10 +11,19 @@ import {
   cancelled,
   EvalResponse,
   Handshake,
+  HealthResponse,
+  InspectResponse,
   parseEval,
   parseHandshake,
   parseHealth,
+  parseInspect,
+  parseProfile,
+  parseVars,
+  ProfileResponse,
+  RuntimeBackend,
   RuntimeClientError,
+  RuntimeErrorPayload,
+  VarsResponse,
 } from "./protocol";
 
 export interface PythonCommand {
@@ -29,6 +43,10 @@ export interface RuntimeSnapshot {
   pid?: number;
   python: string;
   pending: number;
+  backend?: RuntimeBackend;
+  /** Bridge only: the kernel's own name and connection file. */
+  kernelName?: string;
+  connectionFile?: string;
 }
 export interface RuntimeOptions {
   workspace: string;
@@ -97,12 +115,28 @@ async function signalTree(child: ChildProcess, force: boolean): Promise<void> {
   }
 }
 
-export class ManagedRuntime {
-  private python: PythonCommand;
+export abstract class RuntimeSession {
+  /** Which backend this session talks to; drives the handshake marker. */
+  protected abstract readonly backend: RuntimeBackend;
+  /**
+   * True when the spawned helper exits right after printing its handshake
+   * (attach mode): that exit is success, not a crash.
+   */
+  protected abstract readonly helperExitsAfterHandshake: boolean;
+  /**
+   * False when the helper is a short-lived CLI whose lingering must not block
+   * shutdown (attach mode: the real work lives in the kernel, not the helper).
+   */
+  protected readonly mustStopHelper: boolean = true;
+  /** Launch the helper process and return it (already spawned). */
+  protected abstract spawnHelper(): ChildProcess;
+  /** Release the backend. Managed mode kills its process tree. */
+  protected abstract stopBackend(): Promise<void>;
+  protected python: PythonCommand;
   private state: RuntimeState = "stopped";
   private child?: ChildProcess;
-  private handshake?: Handshake;
-  private token = "";
+  protected handshake?: Handshake;
+  protected token = "";
   private epoch = 0;
   private cancellationReason: string | undefined;
   private disposed = false;
@@ -116,7 +150,7 @@ export class ManagedRuntime {
   private poll?: NodeJS.Timeout;
   private inFlight = false;
 
-  constructor(private readonly options: RuntimeOptions) {
+  constructor(protected readonly options: RuntimeOptions) {
     this.python = options.python;
   }
   get snapshot(): RuntimeSnapshot {
@@ -125,7 +159,17 @@ export class ManagedRuntime {
       pid: this.handshake?.pid,
       python: this.python.command,
       pending: this.pending,
+      backend: this.backend,
+      kernelName: this.handshake?.kernelName,
+      connectionFile: this.handshake?.connectionFile,
     };
+  }
+  /** True while the helper process is expected to still be running. */
+  private helperAlive(): boolean {
+    if (!this.child) {
+      return false;
+    }
+    return this.helperExitsAfterHandshake || alive(this.child);
   }
   private notify(): void {
     this.options.onState?.(this.snapshot);
@@ -161,7 +205,7 @@ export class ManagedRuntime {
     if (this.disposed) {
       throw cancelled();
     }
-    if (this.child && alive(this.child) && this.handshake) {
+    if (this.helperAlive() && this.handshake) {
       return;
     }
     if (this.startup?.epoch === this.epoch) {
@@ -181,27 +225,7 @@ export class ManagedRuntime {
     this.setState("starting");
     this.token = randomBytes(32).toString("hex");
     const token = this.token; // Keep this process's secret even across a later restart.
-    const child = spawn(
-      this.python.command,
-      [
-        ...(this.python.args ?? []),
-        "-m",
-        "neura_runtime",
-        "--port",
-        "0",
-        `--token=${this.token}`,
-        "--workspace",
-        this.options.workspace,
-      ],
-      {
-        cwd: this.options.workspace,
-        env: { ...process.env, PYTHONUNBUFFERED: "1" },
-        shell: false,
-        windowsHide: true,
-        detached: process.platform !== "win32",
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
+    const child = this.spawnHelper();
     this.child = child;
     let stderr = "";
     let stderrLine = "";
@@ -246,6 +270,10 @@ export class ManagedRuntime {
         ),
       );
       child.once("exit", (code, sig) => {
+        if (this.helperExitsAfterHandshake) {
+          // Attach mode: the CLI has already handed off to the kernel bridge.
+          return;
+        }
         if (stderrLine) {
           this.log(stderrLine, token);
           stderrLine = "";
@@ -354,7 +382,7 @@ export class ManagedRuntime {
       try {
         const handshake = await ready;
         this.check(epoch);
-        if (!alive(child)) {
+        if (!this.helperAlive()) {
           throw new RuntimeClientError(
             "startup",
             "Runtime exited during startup.",
@@ -467,7 +495,7 @@ export class ManagedRuntime {
         return result;
       } catch (error) {
         this.check(epoch);
-        if (this.child && alive(this.child)) {
+        if (this.helperAlive()) {
           try {
             const health = parseHealth(
               await this.request("GET", "/health", undefined, 1500),
@@ -523,12 +551,7 @@ export class ManagedRuntime {
           this.schedulePoll(epoch);
         }
       } catch {
-        if (
-          !this.disposed &&
-          epoch === this.epoch &&
-          this.child &&
-          alive(this.child)
-        ) {
+        if (!this.disposed && epoch === this.epoch && this.helperAlive()) {
           this.setState("unresponsive");
           this.schedulePoll(epoch);
         }
@@ -537,8 +560,94 @@ export class ManagedRuntime {
     this.poll.unref();
   }
 
+  /** Current health, for callers that poll outside the run queue. */
+  async health(timeoutMs = 3000): Promise<HealthResponse> {
+    if (!this.handshake) {
+      throw new RuntimeClientError("transport", "Runtime is not connected.");
+    }
+    return parseHealth(await this.request("GET", "/health", undefined, timeoutMs));
+  }
+
+  /** Bounded summary of the namespace; serialized against /eval like a run. */
+  async listVars(timeoutMs = 10000): Promise<VarsResponse> {
+    if (!this.handshake) {
+      throw new RuntimeClientError("transport", "Runtime is not connected.");
+    }
+    return parseVars(
+      await this.request("GET", "/vars", undefined, timeoutMs),
+    );
+  }
+
+  /** Bounded preview of a DataFrame variable. */
+  async inspect(
+    name: string,
+    rows = 5,
+    timeoutMs = 10000,
+  ): Promise<InspectResponse> {
+    if (!this.handshake) {
+      throw new RuntimeClientError("transport", "Runtime is not connected.");
+    }
+    return parseInspect(
+      await this.request(
+        "POST",
+        "/inspect",
+        JSON.stringify({ name, n: rows }),
+        timeoutMs,
+      ),
+    );
+  }
+
+  /** Budgeted statistical profile of a DataFrame variable. */
+  async profile(
+    name: string,
+    config?: Record<string, number>,
+    timeoutMs = 60000,
+  ): Promise<ProfileResponse> {
+    if (!this.handshake) {
+      throw new RuntimeClientError("transport", "Runtime is not connected.");
+    }
+    return parseProfile(
+      await this.request(
+        "POST",
+        "/profile",
+        JSON.stringify({ name, config: config ?? {} }),
+        timeoutMs,
+      ),
+    );
+  }
+
+  async lastError(timeoutMs = 5000): Promise<RuntimeErrorPayload | null> {
+    if (!this.handshake) {
+      throw new RuntimeClientError("transport", "Runtime is not connected.");
+    }
+    const value = (await this.request(
+      "GET",
+      "/last_error",
+      undefined,
+      timeoutMs,
+    )) as Record<string, unknown>;
+    if (value.ok !== true || !("last_error" in value)) {
+      throw new RuntimeClientError(
+        "protocol",
+        "Invalid last_error response.",
+      );
+    }
+    const error = value.last_error;
+    if (!error) {
+      return null;
+    }
+    const payload = error as RuntimeErrorPayload;
+    if (typeof payload.type !== "string" || typeof payload.message !== "string") {
+      throw new RuntimeClientError(
+        "protocol",
+        "Invalid last_error response.",
+      );
+    }
+    return payload;
+  }
+
   async interrupt(): Promise<boolean> {
-    if (!this.handshake || !this.child || !alive(this.child) || this.disposed) {
+    if (!this.handshake || !this.helperAlive() || this.disposed) {
       return false;
     }
     const value = (await this.request(
@@ -586,14 +695,14 @@ export class ManagedRuntime {
   async stop(): Promise<void> {
     this.cancellationReason = undefined;
     this.epoch++;
-    await this.stopProcess();
+    await this.stopBackend();
   }
   async dispose(): Promise<void> {
     this.disposed = true;
     await this.stop();
   }
 
-  private stopProcess(): Promise<void> {
+  protected stopProcess(): Promise<void> {
     if (this.stopPromise) {
       return this.stopPromise;
     }
@@ -608,10 +717,11 @@ export class ManagedRuntime {
     this.handshake = undefined;
     const operation = (async () => {
       if (child) {
+        const grace = this.mustStopHelper ? 1800 : 600;
         await signalTree(child, false);
-        if (!(await waitForExit(child, 1800))) {
+        if (!(await waitForExit(child, grace))) {
           await signalTree(child, true);
-          if (!(await waitForExit(child, 1800))) {
+          if (!(await waitForExit(child, grace)) && this.mustStopHelper) {
             throw new RuntimeClientError(
               "transport",
               "Could not stop the old runtime; refusing to start a second process.",
@@ -641,7 +751,7 @@ export class ManagedRuntime {
     return operation;
   }
 
-  private request(
+  protected request(
     method: string,
     path: string,
     body: string | undefined,
@@ -755,5 +865,116 @@ export class ManagedRuntime {
       }
       request.end();
     });
+  }
+}
+
+/** Managed mode: the extension owns a fresh `neura_runtime` process. */
+export class ManagedRuntime extends RuntimeSession {
+  protected readonly backend: RuntimeBackend = "runtime";
+  protected readonly helperExitsAfterHandshake = false;
+
+  protected spawnHelper(): ChildProcess {
+    return spawn(
+      this.python.command,
+      [
+        ...(this.python.args ?? []),
+        "-m",
+        "neura_runtime",
+        "--port",
+        "0",
+        `--token=${this.token}`,
+        "--workspace",
+        this.options.workspace,
+      ],
+      {
+        cwd: this.options.workspace,
+        env: { ...process.env, PYTHONUNBUFFERED: "1" },
+        shell: false,
+        windowsHide: true,
+        detached: process.platform !== "win32",
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+  }
+
+  protected async stopBackend(): Promise<void> {
+    // Killing the process tree is the whole shutdown story here.
+    await this.stopProcess();
+  }
+}
+
+export interface AttachOptions {
+  workspace: string;
+  python: PythonCommand;
+  /** Connection file path or name; omit to auto-discover a single kernel. */
+  kernel?: string;
+  startupTimeoutMs?: number;
+  onState?: (snapshot: RuntimeSnapshot) => void;
+  onLog?: (message: string) => void;
+}
+
+/**
+ * Attach mode: inject the bridge into an already-running Jupyter kernel.
+ *
+ * The helper CLI prints the handshake and then exits, so `stop()` asks the
+ * bridge to shut down (leaving the kernel and its namespace alive) instead of
+ * killing a process tree the user still needs.
+ */
+export class AttachedRuntime extends RuntimeSession {
+  protected readonly backend: RuntimeBackend = "bridge";
+  protected readonly helperExitsAfterHandshake = true;
+  protected readonly mustStopHelper = false;
+  private kernel?: string;
+
+  constructor(options: AttachOptions) {
+    super({
+      workspace: options.workspace,
+      python: options.python,
+      startupTimeoutMs: options.startupTimeoutMs,
+      onState: options.onState,
+      onLog: options.onLog,
+    });
+    this.kernel = options.kernel;
+  }
+
+  get describe(): string {
+    const name = this.kernel ?? "auto-discovered kernel";
+    return `${this.python.command} -m neura_bridge.attach (${name})`;
+  }
+
+  protected spawnHelper(): ChildProcess {
+    return spawn(
+      this.python.command,
+      [
+        ...(this.python.args ?? []),
+        "-m",
+        "neura_bridge.attach",
+        "--workspace",
+        this.options.workspace,
+        `--token=${this.token}`,
+        ...(this.kernel ? ["--kernel", this.kernel] : []),
+      ],
+      {
+        cwd: this.options.workspace,
+        env: { ...process.env, PYTHONUNBUFFERED: "1" },
+        shell: false,
+        windowsHide: true,
+        detached: process.platform !== "win32",
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+  }
+
+  protected async stopBackend(): Promise<void> {
+    // Ask the bridge to stop first; the kernel must survive it. The helper
+    // process has already exited, so there is no tree to signal.
+    if (this.handshake) {
+      try {
+        await this.request("POST", "/stop", "{}", 5000);
+      } catch {
+        // A bridge that is already gone is the desired end state.
+      }
+    }
+    await this.stopProcess();
   }
 }

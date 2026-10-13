@@ -17,7 +17,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "httpx", "ruff"]
+# Attach mode runs inside a live Jupyter/IPython kernel.
+bridge = ["ipykernel>=7.0", "jupyter_client>=8.6", "jupyter_core>=5.3"]
+dev = [
+    "pytest",
+    "httpx",
+    "ruff",
+    "ipykernel>=7.0",
+    "jupyter_client>=8.6",
+    "jupyter_core>=5.3",
+]
 
 [tool.setuptools]
 packages = ["neura_core", "neura_runtime", "neura_bridge"]

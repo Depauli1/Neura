@@ -1,6 +1,6 @@
 # Neura V1 — Product & Technical Decisions (Docs)
 Status: Draft (living document)  
-Last updated: 2026-10-09  
+Last updated: 2026-10-13  
 Owner: Neura team
 
 ## 1) Summary

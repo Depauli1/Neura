@@ -45,6 +45,10 @@
         "title": "Neura: Restart Runtime"
       },
       {
+        "command": "neura.attachKernel",
+        "title": "Neura: Attach to Notebook Kernel"
+      },
+      {
         "command": "neura.interrupt",
         "title": "Neura: Interrupt"
       },
@@ -113,6 +117,26 @@
           "maximum": 120,
           "scope": "resource",
           "description": "How long to wait for runtime startup and its ready handshake."
+        },
+        "neura.llm.baseUrl": {
+          "type": "string",
+          "default": "https://api.openai.com/v1",
+          "scope": "resource",
+          "description": "OpenAI-compatible chat-completions base URL (no trailing slash). Works with OpenAI, Ollama, vLLM, LM Studio and similar gateways."
+        },
+        "neura.llm.model": {
+          "type": "string",
+          "default": "gpt-4o-mini",
+          "scope": "resource",
+          "description": "Default model for Neura's LLM features. Overridable per request."
+        },
+        "neura.llm.timeoutSeconds": {
+          "type": "number",
+          "default": 60,
+          "minimum": 1,
+          "maximum": 600,
+          "scope": "resource",
+          "description": "Per-request timeout for LLM calls."
         }
       }
     }

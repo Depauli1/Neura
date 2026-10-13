@@ -84,3 +84,91 @@ Most responses use:
   "version": "0.1.0"
 }
 ```
+
+`version` carries the API version (`0.1.0`). A successful call also carries its
+payload (`execution`, `vars`, `inspect`, `profile`, `last_error`, …). Failures
+add `error`:
+
+```json
+{
+  "ok": false,
+  "version": "0.1.0",
+  "error": {
+    "type": "ZeroDivisionError",
+    "message": "division by zero",
+    "traceback": "Traceback (most recent call last): …"
+  }
+}
+```
+
+### 5.1 Which failures are HTTP errors
+
+- **HTTP 4xx/5xx** is reserved for transport and protocol problems: `401` for a
+  missing/incorrect token, `409` (`BusyError`) when another execution holds the
+  slot, `413` for an oversized body, `415` for a non-JSON POST, `422` for an
+  invalid schema, `503` (`RuntimeStoppingError`) while shutting down.
+- **Domain failures** — an unknown variable name, a name that is not a
+  DataFrame — return **HTTP 200 with `ok: false`** and a structured `error`, so
+  a caller can tell "the runtime could not answer" from "the runtime answered:
+  no".
+
+## 6) Endpoints
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | Liveness plus `status`/`busy`. |
+| `POST` | `/eval` | Run code in the persistent namespace. |
+| `POST` | `/interrupt` | Best-effort interrupt of the active execution. |
+| `GET` | `/vars` | Bounded summary of user variables. |
+| `POST` | `/inspect` | Bounded preview of a DataFrame variable. |
+| `POST` | `/profile` | Budgeted statistical profile of a DataFrame. |
+| `GET` | `/last_error` | Most recent structured execution error, or `null`. |
+| `POST` | `/stop` | Stop the backend (the bridge keeps its kernel alive). |
+
+`/eval` accepts `{"code": "...", "timeout_s": 30, "cwd": null}` and returns
+`execution`:
+
+```json
+{
+  "stdout": "hello\n",
+  "stderr": "",
+  "stdout_truncated": false,
+  "stderr_truncated": false,
+  "result_repr": "42",
+  "result_kind": "value",
+  "result_repr_truncated": false,
+  "state_changed": true,
+  "rich_truncated": false,
+  "duration_ms": 3,
+  "outputs": []
+}
+```
+
+`outputs` holds bounded rich items (`html`, `image_png`, `dataframe`, `text`);
+see [the runtime guide](../runtime-development.md#rich-output-capture-outputs).
+`/inspect` accepts `{"name": "df", "n": 5, "timeout_s": 10}` and `/profile`
+accepts `{"name": "df", "config": {...}, "timeout_s": 10}`; both clamp their
+budgets and return `ok: false` for domain failures.
+
+Every method is serialized through the backend's single execution slot, so the
+namespace is never read while user code mutates it. Concretely: `/eval`,
+`/vars`, `/inspect` and `/profile` share one slot and return `409` while it is
+held, while `/health`, `/interrupt`, `/last_error` and `/stop` stay serviceable.
+
+## 7) Handshake
+
+Both backends print one flushed JSON line on stdout when they are ready:
+
+```json
+{"neura_runtime": true, "port": 51243, "pid": 12345, "version": "0.1.0"}
+```
+
+```json
+{"neura_bridge": true, "port": 51243, "pid": 12345, "version": "0.1.0",
+ "kernel": "ZMQInteractiveShell", "kernel_name": "python3",
+ "connection_file": "…/kernel-1234.json"}
+```
+
+The marker field (`neura_runtime` or `neura_bridge`) tells the client which
+backend it attached to; everything after the handshake is identical. The token
+never appears in the handshake or in logs.

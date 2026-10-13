@@ -4,7 +4,13 @@ import { cellAt } from "./cells";
 import { OutputsPanel } from "./outputsPanel";
 import { cancelled, RuntimeClientError } from "./protocol";
 import { resolvePython } from "./python";
-import { ManagedRuntime, RuntimeSnapshot } from "./runtime";
+import { clearApiKey, hasApiKey, storeApiKey } from "./llm";
+import {
+  AttachedRuntime,
+  ManagedRuntime,
+  RuntimeSession,
+  RuntimeSnapshot,
+} from "./runtime";
 
 let shutdown: (() => Promise<void>) | undefined;
 
@@ -14,7 +20,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.StatusBarAlignment.Left,
     40,
   );
-  const sessions = new Map<string, Promise<ManagedRuntime>>();
+  const sessions = new Map<string, Promise<RuntimeSession>>();
   const snapshots = new Map<string, RuntimeSnapshot>();
   let disposed = false;
   const outputs = new OutputsPanel({
@@ -150,7 +156,7 @@ export function activate(context: vscode.ExtensionContext): void {
       busy,
     );
   }
-  function session(folder: vscode.WorkspaceFolder): Promise<ManagedRuntime> {
+  function session(folder: vscode.WorkspaceFolder): Promise<RuntimeSession> {
     const key = folder.uri.toString();
     const existing = sessions.get(key);
     if (existing) {
@@ -189,6 +195,74 @@ export function activate(context: vscode.ExtensionContext): void {
     return promise;
   }
 
+  /**
+   * Attach mode: reuse a Jupyter kernel that is already running instead of
+   * spawning a managed process. Sessions are keyed per folder exactly like
+   * managed ones, so commands and the Outputs panel need no special casing.
+   */
+  async function attach(key?: string): Promise<void> {
+    trusted();
+    const folder = await chooseFolder(key);
+    if (!folder) {
+      return;
+    }
+    const existing = sessions.get(folder.uri.toString());
+    if (existing) {
+      const session = await existing;
+      void vscode.window.showInformationMessage(
+        `Neura: ${folder.name} already has a ${session.snapshot.backend ?? "runtime"} session. Restart it to switch backends.`,
+      );
+      return;
+    }
+    const connectionFile = await vscode.window.showInputBox({
+      prompt:
+        "Jupyter kernel connection file (path or name). Leave empty to auto-discover a single running kernel.",
+      placeHolder: "kernel-1234.json",
+    });
+    if (connectionFile === undefined) {
+      return;
+    }
+    outputs.show();
+    const python = await resolvePython(folder);
+    const runtime = new AttachedRuntime({
+      workspace: folder.uri.fsPath,
+      python,
+      kernel: connectionFile.trim() || undefined,
+      startupTimeoutMs:
+        setting(folder, "startupTimeoutSeconds", 30, 120) * 1000,
+      onLog: (text) => {
+        if (!disposed) {
+          log.appendLine(`[${folder.name}] ${text}`);
+        }
+      },
+      onState: (snapshot) => {
+        if (!disposed && folderByKey(folder.uri.toString())) {
+          snapshots.set(folder.uri.toString(), snapshot);
+          outputs.updateRuntime(folder.uri.toString(), snapshot);
+          updateStatus();
+        }
+      },
+    });
+    const promise = Promise.resolve(runtime);
+    sessions.set(folder.uri.toString(), promise);
+    void promise.catch(() => {
+      if (sessions.get(folder.uri.toString()) === promise) {
+        sessions.delete(folder.uri.toString());
+      }
+    });
+    try {
+      await runtime.start();
+      const name = runtime.snapshot.kernelName ?? "kernel";
+      void vscode.window.showInformationMessage(
+        `Neura: attached to ${name} in ${folder.name}.`,
+      );
+    } catch (error) {
+      sessions.delete(folder.uri.toString());
+      await runtime.dispose();
+      throw error;
+    }
+  }
+
   async function run(kind: "cell" | "selection"): Promise<void> {
     trusted();
     const editor = vscode.window.activeTextEditor;
@@ -198,7 +272,7 @@ export function activate(context: vscode.ExtensionContext): void {
       !editor.document.fileName.toLowerCase().endsWith(".py")
     ) {
       throw new Error(
-        "Open a local .py file to run a cell or selection. Notebook execution is not implemented yet.",
+        "Open a local .py file to run a cell or selection, or attach to a notebook kernel first.",
       );
     }
     const folder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
@@ -313,12 +387,38 @@ export function activate(context: vscode.ExtensionContext): void {
   command("neura.runCell", () => run("cell"));
   command("neura.runSelection", () => run("selection"));
   command("neura.restartRuntime", restart);
+  command("neura.attachKernel", attach);
   command("neura.interrupt", interrupt);
   command("neura.showOutputs", () => outputs.show());
   command("neura.showRuntimeLog", () => log.show(true));
-  command("neura.ask", () => {
+  command("neura.setLlmKey", async () => {
+    const key = await vscode.window.showInputBox({
+      prompt: "LLM API key (stored in your OS keychain via VS Code SecretStorage)",
+      password: true,
+      ignoreFocusOut: true,
+    });
+    if (key === undefined) {
+      return;
+    }
+    await storeApiKey(context.secrets, key);
     void vscode.window.showInformationMessage(
-      "Neura Chat is not implemented yet. You can run Python cells and selections now.",
+      key.trim()
+        ? "Neura: LLM API key stored in SecretStorage."
+        : "Neura: LLM API key cleared.",
+    );
+  });
+  command("neura.clearLlmKey", async () => {
+    await clearApiKey(context.secrets);
+    void vscode.window.showInformationMessage(
+      "Neura: LLM API key cleared.",
+    );
+  });
+  command("neura.ask", async () => {
+    const configured = await hasApiKey(context.secrets);
+    void vscode.window.showInformationMessage(
+      configured
+        ? "Neura Chat is not implemented yet. Your API key is configured; run Python cells and selections now."
+        : "Neura Chat is not implemented yet. Set an LLM API key with Neura: Set LLM API Key, then run Python cells and selections.",
     );
   });
   command("neura.profileDataFrame", () => {

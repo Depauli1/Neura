@@ -1,4 +1,4 @@
-import { EvalResponse } from "./protocol";
+import { EvalResponse, RichOutput } from "./protocol";
 import { RuntimeSnapshot } from "./runtime";
 
 export interface OutputEntry {
@@ -28,6 +28,166 @@ export function escapeHtml(value: string): string {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 }
+/**
+ * Allowlist sanitizer for captured HTML.
+ *
+ * The runtime returns raw HTML by design (it executes with the user's own
+ * permissions, so it is not a security boundary), which makes this the
+ * security boundary for the webview. Anything not on the allowlist is dropped,
+ * including event handlers and non-http(s)/data:image URLs.
+ */
+const ALLOWED_TAGS = new Set([
+  "a", "b", "blockquote", "br", "caption", "code", "col", "colgroup", "dd",
+  "div", "dl", "dt", "em", "figcaption", "figure", "h1", "h2", "h3", "h4",
+  "h5", "h6", "hr", "i", "img", "li", "ol", "p", "pre", "small", "span",
+  "strong", "sub", "summary", "sup", "table", "tbody", "td", "tfoot", "th",
+  "thead", "tr", "u", "ul", "s",
+]);
+const ALLOWED_ATTRS = new Set([
+  "alt", "class", "colspan", "height", "href", "rowspan", "src", "title",
+  "width",
+]);
+const ALLOWED_STYLE = new Set([
+  "color", "background-color", "border", "border-collapse", "font-size",
+  "font-style", "font-weight", "font-family", "margin", "margin-left",
+  "margin-right", "padding", "padding-left", "padding-right", "text-align",
+  "text-decoration", "vertical-align", "white-space", "width", "max-width",
+]);
+const SAFE_URL = /^(?:https?:|mailto:)/i;
+const SAFE_IMAGE = /^data:image\/(?:png|jpeg|jpg|gif|webp);base64,[a-z0-9+/=\s]+$/i;
+
+export function sanitizeHtml(html: string): string {
+  const tagPattern = /<\/?[a-zA-Z][^>]*>/g;
+  const attrPattern =
+    /([a-zA-Z_:][\w:.-]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g;
+  const voidTags = new Set(["br", "hr", "img", "col"]);
+  const dropWithContent = new Set([
+    "script", "style", "iframe", "object", "embed", "link", "meta",
+    "template", "noscript", "title", "base", "form", "input", "button",
+  ]);
+  let result = "";
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = tagPattern.exec(html))) {
+    result += escapeHtml(html.slice(cursor, match.index));
+    cursor = match.index + match[0].length;
+    const tag = match[0];
+    const name = (tag.match(/^<\/?\s*([a-zA-Z][\w-]*)/) ?? [])[1]?.toLowerCase();
+    if (!name) {
+      continue;
+    }
+    if (!ALLOWED_TAGS.has(name)) {
+      if (dropWithContent.has(name) && !tag.startsWith("</")) {
+        // Skip everything up to the matching close tag (or the next tag).
+        const closing = new RegExp(`</\s*${name}\s*>`, "i");
+        const rest = html.slice(cursor);
+        const found = closing.exec(rest);
+        cursor += found ? found.index + found[0].length : 0;
+      }
+      continue;
+    }
+    if (tag.startsWith("</")) {
+      if (!voidTags.has(name)) {
+        result += `</${name}>`;
+      }
+      continue;
+    }
+    const body = tag.replace(/^<\s*[a-zA-Z][\w-]*/, "").replace(/\/?>$/, "");
+    let attrs = "";
+    let attribute: RegExpExecArray | null;
+    attrPattern.lastIndex = 0;
+    while ((attribute = attrPattern.exec(body))) {
+      const attributeName = attribute[1].toLowerCase();
+      if (
+        !ALLOWED_ATTRS.has(attributeName) ||
+        attributeName.startsWith("on") ||
+        attributeName === "style"
+      ) {
+        if (attributeName === "style") {
+          const safe = sanitizeStyle(attribute[2] ?? attribute[3] ?? attribute[4] ?? "");
+          if (safe) {
+            attrs += ` style="${escapeHtml(safe)}"`;
+          }
+        }
+        continue;
+      }
+      const value = attribute[2] ?? attribute[3] ?? attribute[4] ?? "";
+      if (attributeName === "href" && !SAFE_URL.test(value.trim())) {
+        continue;
+      }
+      if (attributeName === "src" && !(name === "img" && SAFE_IMAGE.test(value.trim()))) {
+        continue;
+      }
+      attrs += ` ${attributeName}="${escapeHtml(value)}"`;
+    }
+    result += voidTags.has(name) ? `<${name}${attrs}>` : `<${name}${attrs}>`;
+    if (voidTags.has(name)) {
+      continue;
+    }
+  }
+  result += escapeHtml(html.slice(cursor));
+  return result;
+}
+function sanitizeStyle(value: string): string {
+  return value
+    .split(";")
+    .map((rule) => rule.trim())
+    .filter((rule) => {
+      const property = rule.split(":")[0]?.trim().toLowerCase();
+      return !!property && ALLOWED_STYLE.has(property) && !/url\(/i.test(rule);
+    })
+    .join("; ");
+}
+function formatCell(value: unknown): string {
+  if (value === null || value === undefined) {
+    return '<span class="null">null</span>';
+  }
+  return escapeHtml(plainText(String(value)));
+}
+function dataframeTable(output: Extract<RichOutput, { kind: "dataframe" }>): string {
+  const head = output.columns
+    .map(
+      (column) =>
+        `<th>${escapeHtml(column.name)}<span class="dtype">${escapeHtml(column.dtype)}</span></th>`,
+    )
+    .join("");
+  const rows = output.rows
+    .map(
+      (row) =>
+        `<tr>${row.map((cell) => `<td>${formatCell(cell)}</td>`).join("")}</tr>`,
+    )
+    .join("");
+  return `<section class="output rich"><div class="section-label">DataFrame ${output.shape[0]} × ${output.shape[1]}${
+    output.truncated ? '<span class="truncate">truncated</span>' : ""
+  }</div><div class="table-scroll"><table><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div></section>`;
+}
+function imageBlock(output: Extract<RichOutput, { kind: "image_png" }>): string {
+  return `<section class="output rich"><div class="section-label">Plot${
+    output.truncated ? '<span class="truncate">truncated</span>' : ""
+  }</div><img class="plot" alt="Matplotlib figure" src="data:image/${escapeHtml(
+    output.format,
+  )};base64,${output.data}" ${
+    output.width ? `width="${output.width}"` : ""
+  }></section>`;
+}
+function htmlBlock(output: Extract<RichOutput, { kind: "html" }>): string {
+  return `<section class="output rich"><div class="section-label">HTML output${
+    output.truncated ? '<span class="truncate">truncated</span>' : ""
+  }</div><div class="sanitized-html">${sanitizeHtml(output.html)}</div></section>`;
+}
+function richBlock(output: RichOutput): string {
+  if (output.kind === "html") {
+    return htmlBlock(output);
+  }
+  if (output.kind === "image_png") {
+    return imageBlock(output);
+  }
+  if (output.kind === "dataframe") {
+    return dataframeTable(output);
+  }
+  return textBlock("Note", output.text, output.truncated === true);
+}
+
 export function plainText(value: string): string {
   // Strip OSC and CSI terminal controls; never interpret output as HTML.
   return value
@@ -66,6 +226,9 @@ function entryHtml(entry: OutputEntry): string {
       output.result_repr_truncated,
       "result",
     );
+  }
+  for (const item of output?.outputs ?? []) {
+    content += richBlock(item);
   }
   if (error) {
     content += `<section class="output error-output"><strong>${escapeHtml(error.type)}: ${escapeHtml(plainText(error.message))}</strong>${
@@ -120,7 +283,7 @@ export function renderOutputs(
     .join("");
   return `<!doctype html><html><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; img-src data:;">
     <title>Neura Outputs</title><style nonce="${nonce}">
     *{box-sizing:border-box}body{padding:0;margin:0;background:var(--vscode-editor-background);color:var(--vscode-foreground);font:var(--vscode-font-size) var(--vscode-font-family)}
     header{position:sticky;top:0;z-index:1;background:var(--vscode-editor-background);border-bottom:1px solid var(--vscode-panel-border);padding:18px 22px}
@@ -135,11 +298,26 @@ export function renderOutputs(
     .badge.success{color:var(--vscode-testing-iconPassed,#6bbf8a)}.badge.error{color:var(--vscode-errorForeground)}.badge.running{color:var(--vscode-progressBar-background)}
     details{border-top:1px solid var(--vscode-panel-border);padding:10px 14px}summary{color:var(--vscode-descriptionForeground);font-size:11px;cursor:pointer}pre{font:var(--vscode-editor-font-size) var(--vscode-editor-font-family);line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0 0}
     .output{border-top:1px solid var(--vscode-panel-border);padding:12px 14px}.section-label{font-size:10px;text-transform:uppercase;letter-spacing:.09em;color:var(--vscode-descriptionForeground)}.truncate{margin-left:8px;color:var(--vscode-editorWarning-foreground)}.stderr{color:var(--vscode-editorWarning-foreground)}.result{background:var(--vscode-textCodeBlock-background)}.error-output{color:var(--vscode-errorForeground)}
-    .muted{color:var(--vscode-descriptionForeground);font-size:12px}.entry>p{padding:0 14px}.busy-note{color:var(--vscode-editorWarning-foreground)}.empty{padding:38px 16px;text-align:center;border:1px dashed var(--vscode-panel-border);border-radius:8px}.empty h2{font-size:16px;font-weight:500}.empty p{line-height:1.7;color:var(--vscode-descriptionForeground)}kbd{padding:2px 5px;border-radius:3px;background:var(--vscode-textCodeBlock-background);font:inherit}
+    .muted{color:var(--vscode-descriptionForeground);font-size:12px}
+    .rich .section-label{display:flex;align-items:center;gap:8px}
+    img.plot{max-width:100%;height:auto;background:var(--vscode-textCodeBlock-background);border-radius:5px;margin-top:8px}
+    .table-scroll{overflow:auto;max-height:340px;margin-top:8px;border:1px solid var(--vscode-panel-border);border-radius:5px}
+    .sanitized-html table,.table-scroll table{border-collapse:collapse;font-size:12px;width:100%}
+    .sanitized-html th,.sanitized-html td,.table-scroll th,.table-scroll td{border:1px solid var(--vscode-panel-border);padding:5px 9px;text-align:left;white-space:nowrap}
+    .table-scroll th{position:sticky;top:0;background:var(--vscode-sideBar-background);z-index:1}
+    .table-scroll .dtype{display:block;font-weight:400;font-size:10px;color:var(--vscode-descriptionForeground)}
+    .table-scroll .null{color:var(--vscode-descriptionForeground);font-style:italic}
+    .sanitized-html{margin-top:8px;overflow:auto;max-height:340px;font-size:12px;line-height:1.5}
+    .sanitized-html a{color:var(--vscode-textLink-foreground)}
+    .sanitized-html pre{white-space:pre-wrap}.entry>p{padding:0 14px}.busy-note{color:var(--vscode-editorWarning-foreground)}.empty{padding:38px 16px;text-align:center;border:1px dashed var(--vscode-panel-border);border-radius:8px}.empty h2{font-size:16px;font-weight:500}.empty p{line-height:1.7;color:var(--vscode-descriptionForeground)}kbd{padding:2px 5px;border-radius:3px;background:var(--vscode-textCodeBlock-background);font:inherit}
     </style></head><body data-workspace="${escapeHtml(workspace?.key ?? "")}">
     <header><div class="brand"><span class="mark">N</span><h1>Neura Outputs</h1><span class="muted">Persistent Python · local execution</span></div>
     <div class="toolbar"><select id="workspace" aria-label="Workspace">${options}</select><button data-action="restart" ${!workspace || state === "stopping" ? "disabled" : ""}>Restart runtime</button><button data-action="interrupt" ${!busy ? "disabled" : ""}>Interrupt</button><span class="spacer"></span><button data-action="log">Runtime log</button><button data-action="clear">Clear outputs</button></div>
-    <div class="runtime"><strong>${escapeHtml(state)}</strong>${workspace?.snapshot.pid ? ` · PID ${workspace.snapshot.pid}` : ""}${workspace ? ` · ${escapeHtml(workspace.snapshot.python)}` : ""}${workspace?.snapshot.pending ? ` · ${workspace.snapshot.pending} active/queued` : ""}</div></header>
+    <div class="runtime"><strong>${escapeHtml(state)}</strong>${
+      workspace?.snapshot.backend === "bridge"
+        ? ` · attached to ${escapeHtml(workspace.snapshot.kernelName ?? "notebook kernel")}`
+        : ""
+    }${workspace?.snapshot.pid ? ` · PID ${workspace.snapshot.pid}` : ""}${workspace ? ` · ${escapeHtml(workspace.snapshot.python)}` : ""}${workspace?.snapshot.pending ? ` · ${workspace.snapshot.pending} active/queued` : ""}</div></header>
     <main>${visible.length ? visible.map(entryHtml).join("") : '<section class="empty"><h2>Your workspace, alive.</h2><p>Open a Python file and run a selection or a <code># %%</code> cell.<br>Use <strong>Neura: Run Cell</strong> or <strong>Neura: Run Selection</strong> in the Command Palette.<br>Variables persist until you restart the runtime.</p></section>'}</main>
     <script nonce="${nonce}">const api=acquireVsCodeApi();document.querySelectorAll('[data-action]').forEach(button=>button.addEventListener('click',()=>api.postMessage({type:button.dataset.action,workspaceKey:document.body.dataset.workspace,id:button.dataset.id})));document.getElementById('workspace').addEventListener('change',event=>api.postMessage({type:'selectWorkspace',workspaceKey:event.target.value}));</script>
     </body></html>`;

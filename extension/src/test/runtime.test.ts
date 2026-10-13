@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { test } from "node:test";
 import { cellAt } from "../cells";
 import { RuntimeClientError } from "../protocol";
-import { ManagedRuntime } from "../runtime";
+import { AttachedRuntime, ManagedRuntime } from "../runtime";
 
 const fakeScript = path.resolve(__dirname, "../../test/fixtures/runtime.cjs");
 async function workspace(): Promise<string> {
@@ -354,3 +354,84 @@ test(
     }
   },
 );
+
+test(
+  "attached runtime: helper exits after handshake, inspection surface, stop keeps the bridge contract",
+  { timeout: 45000 },
+  async () => {
+    const root = await workspace();
+    const logs: string[] = [];
+    const runtime = new AttachedRuntime({
+      workspace: root,
+      python: { command: process.execPath, args: [fakeScript, "bridge-attach"] },
+      startupTimeoutMs: 8000,
+      onLog: (line) => logs.push(line),
+    });
+    try {
+      await runtime.start();
+      assert.equal(runtime.snapshot.state, "ready");
+      assert.equal(runtime.snapshot.backend, "bridge");
+      assert.equal(runtime.snapshot.kernelName, "python3");
+      // The helper process exited right after the handshake, by design.
+      assert(await until(() => logs.length > 0).then(() => true, () => false));
+      // The shared HTTP surface still answers.
+      const health = await runtime.health();
+      assert.equal(health.status, "ready");
+      const vars = await runtime.listVars();
+      assert.equal(vars.vars[0].name, "df");
+      const inspect = await runtime.inspect("df", 1);
+      assert.equal(inspect.inspect?.shape[0], 3);
+      assert.equal(inspect.inspect?.more_rows, true);
+      const missing = await runtime.inspect("missing");
+      assert.equal(missing.ok, false);
+      assert.equal(missing.error?.type, "DataFrameError");
+      const profile = await runtime.profile("df");
+      assert.equal(profile.profile?.columns[0].numeric?.mean, 2);
+      assert.equal(await runtime.lastError(), null);
+      const run = await runtime.run("print('from the kernel')", 10);
+      assert.equal(run.execution?.stdout, "print('from the kernel')");
+      // Stopping asks the bridge to stop and reports the session as stopped.
+      await runtime.stop();
+      assert.equal(runtime.snapshot.state, "stopped");
+      // Attaching again brings the same session back without a new kernel.
+      await runtime.start();
+      assert.equal(runtime.snapshot.state, "ready");
+      assert.equal((await runtime.health()).status, "ready");
+      assert.equal(
+        (await runtime.run("print('re-attached')", 10)).execution?.stdout,
+        "print('re-attached')",
+      );
+    } finally {
+      await runtime.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test("managed runtime inspection surface against the fake backend", async () => {
+  const root = await workspace();
+  const runtime = fake(root, "normal");
+  try {
+    await runtime.start();
+    const vars = await runtime.listVars();
+    assert.equal(vars.total, 1);
+    assert.equal(vars.truncated, false);
+    assert.equal(vars.vars[0].kind, "dataframe");
+    const inspect = await runtime.inspect("df", 2);
+    assert.equal(inspect.ok, true);
+    assert.deepEqual(inspect.inspect?.columns[1], {
+      name: "b",
+      dtype: "object",
+      null_count: 1,
+    });
+    const missing = await runtime.inspect("missing");
+    assert.equal(missing.ok, false);
+    const profile = await runtime.profile("df", { sample_rows: 2 });
+    assert.equal(profile.profile?.partial, false);
+    assert.equal(profile.profile?.payload_bytes, 512);
+    assert.equal(await runtime.lastError(), null);
+  } finally {
+    await runtime.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});

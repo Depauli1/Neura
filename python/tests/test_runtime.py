@@ -272,8 +272,12 @@ def test_output_and_result_are_bounded(runtime):
     ).json()
     assert payload["ok"] is True
     execution = payload["execution"]
-    assert execution["stdout"] == "x" * MAX_OUTPUT_CHARS
-    assert execution["stderr"] == "y" * MAX_OUTPUT_CHARS
+    assert execution["stdout"] == "x" * (MAX_OUTPUT_CHARS - len("... [truncated]")) + (
+        "... [truncated]"
+    )
+    assert execution["stderr"] == "y" * (MAX_OUTPUT_CHARS - len("... [truncated]")) + (
+        "... [truncated]"
+    )
     assert execution["stdout_truncated"] is True
     assert execution["stderr_truncated"] is True
     assert len(execution["result_repr"]) <= MAX_RESULT_REPR_CHARS
