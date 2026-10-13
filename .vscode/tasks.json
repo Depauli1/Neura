@@ -1,0 +1,14 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Compile Neura extension",
+      "type": "shell",
+      "command": "npm",
+      "args": ["run", "compile"],
+      "options": { "cwd": "${workspaceFolder}/extension" },
+      "problemMatcher": "$tsc",
+      "group": { "kind": "build", "isDefault": true }
+    }
+  ]
+}

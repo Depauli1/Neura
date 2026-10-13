@@ -44,5 +44,22 @@ The runtime prints a readiness JSON line with its port and PID, binds only to
 and `POST /interrupt`. See the [runtime guide](docs/runtime-development.md) for
 request/response examples and budget/interrupt limitations.
 
-The notebook bridge, DataFrame/plot outputs, and VS Code command wiring are still
-scaffolds or future work.
+## Run Python from VS Code
+
+The first managed `.py` execution slice is implemented: one persistent runtime
+per workspace folder, Run Cell (`# %%`) / Run Selection, a text Outputs panel,
+and restart/interrupt controls. Uses the Python extension's selected interpreter
+or the `neura.pythonPath` override; the runtime must be installed there.
+
+1. Install the runtime in your selected Python environment as above.
+2. Run `cd extension && npm ci && npm run compile`.
+3. Open the repository root in desktop VS Code and press **F5 → Neura Extension**.
+4. In the Development Host, select that interpreter (or set `neura.pythonPath`),
+   open `fixtures/runtime-demo.py`, and use **Neura: Run Cell** / **Run Selection**.
+
+See [VS Code setup, commands, settings, and smoke test](docs/extension-development.md).
+Extension automated checks: `npm test` in `extension/` (requires the Python runtime;
+set `NEURA_TEST_PYTHON` for a non-PATH interpreter).
+
+The notebook bridge, DataFrame/plot outputs, profiling, and AI chat remain future
+work. This is a usable execution foundation, **not complete V1**.

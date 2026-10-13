@@ -5,8 +5,10 @@ interrupts, and budgeted text/error responses. This document describes the
 implemented endpoint schemas; the original [API draft](api/runtime-api.md) and
 [V1 decisions](v1-decisions.md) are preserved as supplied.
 
-The notebook bridge and VS Code commands remain scaffolds. DataFrame inspection,
-profiling, rich display/HTML, and plot capture are not implemented in this step.
+The [VS Code execution slice](extension-development.md) now wires the managed
+runtime to cell/selection execution, an Outputs panel, and restart/interrupt.
+The notebook bridge, DataFrame inspection/profiling, rich display/HTML, and plot
+capture are not implemented yet.
 
 ## Install and verify
 
@@ -35,7 +37,7 @@ npm run compile
 
 ## Launch contract
 
-The extension will generate a fresh token for each runtime. For manual testing
+The extension generates a fresh token for each runtime. For manual testing
 in a POSIX shell:
 
 ```sh
